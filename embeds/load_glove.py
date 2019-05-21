@@ -3,7 +3,7 @@ from os import path, remove
 from util.path_ext import *
 from data.data_load import *
 from util.io_ext import *
-from util.print_ext import *
+from util.general_ext import *
 import zipfile
 
 supported_glove_dimensions = (50, 100, 200, 300)
@@ -52,7 +52,7 @@ def load_glove_embedding(dimension: int):
             remove(txt_data_file)
             return glove_dict
     else:
-        error_print(error_place=path.abspath(__file__), message='glove vectors only available in the following dimensions: ' + str(supported_glove_dimensions))
+        error_print(error_tag=path.abspath(__file__), message='glove vectors only available in the following dimensions: ' + str(supported_glove_dimensions))
 
 
 if __name__ == '__main__':

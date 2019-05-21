@@ -6,19 +6,28 @@ from typing import Tuple
 
 def _normalize_adj(adj):
     adj = sp.coo_matrix(adj)
-    rowsum = np.array(adj.sum(1))
-    d_inv_sqrt = np.power(rowsum, -0.5).flatten()
+    row_sum = np.array(adj.sum(1))
+    d_inv_sqrt = np.power(row_sum, -0.5).flatten()
     d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
     d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
     return adj.dot(d_mat_inv_sqrt).transpose().dot(d_mat_inv_sqrt).tocoo()
 
 
-def approx_graph_conv(adjacency_matrix):
-    """Preprocessing of adjacency matrix for simple GCN model and conversion to tuple representation."""
+def _approx_graph_conv_tf(adjacency_matrix):
+    """
+    Creates an approximate graph convolution operator for TensorFlow given the adjacency matrix.
+    :param adjacency_matrix: the adjacency matrix.
+    :return: a tuple that can be fed into TensorFlow's sparse placeholder.
+    The first of the tuple is a two-column numpy array consisting of the coordinates,
+    the second is the values corresponding to each coordinate,
+    and the third is the shape of the adjacency matrix.
+    """
+    # NOTE `sparse_to_tuple` converts the adjacency matrix to a tuple representation required by TensorFlow's sparse placeholder.
+    # see https://www.tensorflow.org/api_docs/python/tf/sparse/placeholder
     return sparse_to_tuple(_normalize_adj(adjacency_matrix + sp.eye(adjacency_matrix.shape[0])))
 
 
-def approx_graph_conv_k(adj, k):
+def _approx_graph_conv_k_tf(adj, k):
     """Calculate Chebyshev polynomials up to order k. Return a list of sparse matrices (tuple representation)."""
     adj_normalized = _normalize_adj(adj)
     laplacian = sp.eye(adj.shape[0]) - adj_normalized
@@ -205,13 +214,13 @@ class GcnTf(ModelTf):
                 self.convolution_values = []
                 self.convolutions_ph = []
                 for adj in adjacency_matrices:
-                    self.convolution_values.append(approx_graph_conv(adj) if convolution_order == 1 else approx_graph_conv_k(adj, k=convolution_order))
+                    self.convolution_values.append(_approx_graph_conv_tf(adj) if convolution_order == 1 else _approx_graph_conv_k_tf(adj, k=convolution_order))
                     self.convolutions_ph.append(tf.sparse_placeholder(tf.float32))
             else:
-                self.convolution_values = approx_graph_conv(adjacency_matrices[0]) if convolution_order == 1 else approx_graph_conv_k(adjacency_matrices[0], k=convolution_order)
+                self.convolution_values = _approx_graph_conv_tf(adjacency_matrices[0]) if convolution_order == 1 else _approx_graph_conv_k_tf(adjacency_matrices[0], k=convolution_order)
                 self.convolutions_ph = tf.sparse_placeholder(tf.float32)
         else:
-            self.convolution_values = approx_graph_conv(adjacency_matrices) if convolution_order == 1 else approx_graph_conv_k(adjacency_matrices, k=convolution_order)
+            self.convolution_values = _approx_graph_conv_tf(adjacency_matrices) if convolution_order == 1 else _approx_graph_conv_k_tf(adjacency_matrices, k=convolution_order)
             self.convolutions_ph = tf.sparse_placeholder(tf.float32)
 
         if sparse_feature:
@@ -221,7 +230,7 @@ class GcnTf(ModelTf):
 
         self.target_ph = tf.placeholder(tf.float32, shape=(None, output_dim))
 
-        self.train_mask_ph = tf.placeholder(tf.int32)
+        self.mask_ph = tf.placeholder(tf.int32)
         self.num_nonzero_features_ph = tf.placeholder(tf.int32)
         self.layer_dropouts = layer_dropouts
         self.layer_bias = layer_bias
@@ -264,25 +273,50 @@ class GcnTf(ModelTf):
                                    logging=False if self.layer_loggings is None else take_element_if_list(self.layer_loggings, i))
         return layers
 
-    def batch_data(self, features, labels, num_features_nonzero, mask, dropouts=None):
+    def training_feed(self, features, labels, num_features_nonzero, mask, dropouts=None):
         return {self.convolutions_ph: self.convolution_values,
                 self.features_ph: features,
                 self.target_ph: labels,
-                self.train_mask_ph: mask,
+                self.mask_ph: mask,
                 self.num_nonzero_features_ph: num_features_nonzero,
-                self.layer_dropouts: 0.0 if dropouts is None else dropouts} if mask is not None else None
+                self.layer_dropouts: 0.0 if dropouts is None else dropouts}
+
+    def prediction_feed(self, features):
+        return {self.convolutions_ph: self.convolution_values,
+                self.features_ph: features}
 
     def train(self, features, labels, train_mask, test_mask, validation_mask=None, num_features_nonzero=None, train_dropouts=None,
               stop_loss: float = 1e-6, max_iter: int = 1000, verbose=True, print_interval=10, validation_data=None, early_stop_lookback=5):
-        return super(GcnTf, self).train(batch_data=self.batch_data(features=features, labels=labels, num_features_nonzero=num_features_nonzero, mask=train_mask, dropouts=train_dropouts),
+        """
+        Trains this graph convolution network.
+        :param features: the node features.
+        :param labels: the true labels for the nodes.
+        :param train_mask:
+        :param test_mask:
+        :param validation_mask:
+        :param num_features_nonzero:
+        :param train_dropouts:
+        :param stop_loss:
+        :param max_iter:
+        :param verbose:
+        :param print_interval:
+        :param validation_data:
+        :param early_stop_lookback:
+        :return:
+        """
+        return super(GcnTf, self).train(batch_data=self.training_feed(features=features, labels=labels, num_features_nonzero=num_features_nonzero, mask=train_mask, dropouts=train_dropouts),
                                         stop_loss=stop_loss,
                                         max_iter=max_iter,
                                         verbose=verbose,
                                         print_interval=print_interval,
-                                        validation_data=self.batch_data(features=features, labels=labels, num_features_nonzero=num_features_nonzero, mask=validation_mask),
-                                        test_data=self.batch_data(features=features, labels=labels, num_features_nonzero=num_features_nonzero, mask=test_mask),
+                                        validation_data=self.training_feed(features=features, labels=labels, num_features_nonzero=num_features_nonzero, mask=validation_mask) if validation_mask is not None else None,
+                                        test_data=self.training_feed(features=features, labels=labels, num_features_nonzero=num_features_nonzero, mask=test_mask) if test_mask is not None else None,
                                         early_stop_lookback=early_stop_lookback)
 
+    def predict(self, features, num_features_nonzero, test_mask, argmax: bool = False):
+        predicted_labels = super(GcnTf, self).predict(batch_data=self.prediction_feed(features=features),
+                                                      argmax=argmax)
+        return predicted_labels[test_mask]
 
     def default_loss(self):
         loss_fun = 0
@@ -297,11 +331,11 @@ class GcnTf(ModelTf):
             for i in range(min(var_count, lambdas_count)):
                 if self.reg_lambda[i] != 0:
                     loss_fun += self.reg_lambda[i] * tf.nn.l2_loss(train_vars[i])
-        loss_fun += masked_cross_entropy(estimated_scores=self.outputs, label_probabilities=self.target_ph, mask=self.train_mask_ph)
+        loss_fun += masked_cross_entropy(estimated_scores=self.outputs, label_probabilities=self.target_ph, mask=self.mask_ph)
         return loss_fun
 
     def default_metric(self):
-        return masked_accuracy(estimated_scores=self.outputs, ground_truth_label_scores=self.target_ph, mask=self.train_mask_ph)
+        return masked_accuracy(estimated_scores=self.outputs, ground_truth_label_scores=self.target_ph, mask=self.mask_ph)
 
-    def predict(self):
+    def default_prediction(self):
         return tf.nn.softmax(self.outputs)

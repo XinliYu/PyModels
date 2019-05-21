@@ -2,7 +2,7 @@ import tensorflow as tf
 from collections import defaultdict
 import numpy as np
 from util.time_exp import TicToc
-from util.print_ext import *
+from util.general_ext import *
 from typing import Tuple, List
 import scipy.sparse as sp
 
@@ -143,7 +143,7 @@ class LayerTf(object):
 
 
 class ModelTf(object):
-    def __init__(self, input_ph, target_ph, loss_fun, optimizer, name: str = None, metric_fun=None, input_dim=None, output_dim=None, hidden_dims: Tuple = None):
+    def __init__(self, input_ph, target_ph, loss_fun, optimizer, name: str = None, metric_fun=None, input_dim=None, output_dim=None, hidden_dims: Tuple = None, prediction_fun=None):
         self.name = self.__class__.__name__.lower() if not name else name
         self.input_ph = input_ph
         self.target_ph = target_ph
@@ -166,6 +166,7 @@ class ModelTf(object):
         self.outputs = x
 
         self.loss_fun = loss_fun if loss_fun is not None else self.default_loss()
+        self.prediction_fun = prediction_fun if prediction_fun is not None else self.default_prediction()
         assert self.loss_fun is not None, "Loss function is not defined."
         self.metric_fun = metric_fun if metric_fun is not None else self.default_metric()
 
@@ -176,24 +177,26 @@ class ModelTf(object):
     def forward(self, x):
         raise NotImplementedError
 
+    def _init_sess(self):
+        if self.sess is None:
+            self.sess = tf.Session()
+            self.sess.run(tf.global_variables_initializer())
+
     def train(self, batch_data, stop_loss: float = 1e-6, max_iter: int = 1000, verbose=True, print_interval=10, validation_data=None, test_data=None, early_stop_lookback=5):
         if batch_data:
-
             prev_evals = []
 
             def _eval_msg(eval_data, eval_name: str):
                 if self.metric_fun is None:
                     eval_outputs = self.sess.run([self.loss_fun], feed_dict=eval_data)
-                    return "{eval_name} loss: {validation_loss:.5f}".format(eval_name=eval_name, validation_loss=eval_outputs[0]), \
+                    return "{eval_name} loss: {eval_loss:.5f}".format(eval_name=eval_name, eval_loss=eval_outputs[0]), \
                            check_early_stop(look_back=early_stop_lookback, curr_eval=eval_outputs[0], prev_evals=prev_evals), eval_outputs
                 else:
                     eval_outputs = self.sess.run([self.loss_fun, self.metric_fun], feed_dict=eval_data)
-                    return "{eval_name} loss: {validation_loss:.5f}, {eval_name} metric: {validation_metric:.5f}".format(eval_name=eval_name, validation_loss=eval_outputs[0], validation_metric=eval_outputs[1]), \
+                    return "{eval_name} loss: {eval_loss:.5f}, {eval_name} metric: {eval_metric:.5f}".format(eval_name=eval_name, eval_loss=eval_outputs[0], eval_metric=eval_outputs[1]), \
                            check_early_stop(look_back=early_stop_lookback, curr_eval=-eval_outputs[1], prev_evals=prev_evals), eval_outputs
 
-            if self.sess is None:
-                self.sess = tf.Session()
-                self.sess.run(tf.global_variables_initializer())
+            self._init_sess()
             if self.watch is None:
                 self.watch = TicToc(update_interval=print_interval)
 
@@ -227,12 +230,29 @@ class ModelTf(object):
                     else:
                         print(train_msg + ', ' + time_msg)
 
+            train_outputs = (train_outputs[1], train_outputs[2] if self.metric_fun is not None else None)
             if test_data is not None:
                 test_msg, _, test_outputs = _eval_msg(test_data, 'test')
                 print(test_msg)
-                return test_outputs, batch_data
+                return batch_data, (test_outputs[0], test_outputs[1] if self.metric_fun is not None else None), train_outputs
             else:
-                return train_outputs, batch_data
+                return batch_data, train_outputs
+
+    def predict(self, batch_data, argmax: bool = False):
+        self._init_sess()
+        if argmax:
+            return self.sess.run(tf.argmax(self.prediction_fun, axis=1), feed_dict=batch_data)
+        else:
+            return self.sess.run(self.prediction_fun, feed_dict=batch_data)
+
+    def default_prediction(self):
+        return NotImplementedError
+
+    def default_loss(self):
+        return NotImplementedError
+
+    def default_metric(self):
+        return None
 
     def eval_embeddings(self, batch_data):
         return self.sess.run(self.embeddings, feed_dict=batch_data)
@@ -241,15 +261,6 @@ class ModelTf(object):
         if self.sess is not None:
             self.sess.reset()
             self.sess = None
-
-    def predict(self):  # TODO
-        raise NotImplementedError
-
-    def default_loss(self):
-        return None
-
-    def default_metric(self):
-        return None
 
     def save(self, file_path: str):
         if self.sess is None:

@@ -1,4 +1,10 @@
 from time import time
+import datetime
+
+_tic_toc_last_time = 0
+_tic_toc_dict = {}
+
+tic_toc_always_enabled = False
 
 
 class TicToc:
@@ -21,3 +27,33 @@ class TicToc:
             return True
         else:
             return False
+
+
+def tic(msg: str = None, key=None):
+    if __debug__ or tic_toc_always_enabled:
+        if msg:
+            print("{} ({}).".format(msg, datetime.datetime.now().strftime("%I:%M %p on %B %d, %Y")))
+
+        if key is None:
+            global _last_time
+            _last_time = time()
+        else:
+            _tic_toc_dict[key] = time()
+
+
+def toc(msg: str = None, key=None):
+    if __debug__ or tic_toc_always_enabled:
+        curr_time = time()
+
+        global _last_time
+        if key is None:
+            last_time = _last_time
+            _last_time = curr_time
+        else:
+            last_time = _tic_toc_dict[key]
+            del _tic_toc_dict[key]
+
+        if msg:
+            print("{} ({:.5f} secs elapsed).".format(msg, curr_time - last_time))
+        else:
+            print("{:.5f} secs elapsed.".format(curr_time - last_time))

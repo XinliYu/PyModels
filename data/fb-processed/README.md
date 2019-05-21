@@ -1,0 +1,1 @@
+Preprocessed facebook EGO networks from https://github.com/lucashu1/link-prediction/tree/master/fb-processed.
